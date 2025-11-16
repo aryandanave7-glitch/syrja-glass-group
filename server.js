@@ -558,20 +558,42 @@ app.post("/relay-message", async (req, res) => {
             return res.status(413).json({ error: `Quota exceeded. Current usage: ${currentUsage} bytes. This message: ${payloadSizeBytes} bytes. Limit: ${USER_QUOTA_BYTES} bytes.` });
         }
 
-        // 3. Store the message
-        const messageDoc = {
-            senderPubKey,
-            recipientPubKey,
-            encryptedPayload,
-            sizeBytes: payloadSizeBytes,
-            createdAt: new Date(),
-            expireAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000) // 14-day TTL
-        };
+        // 3. Check if user is online for real-time delivery
+        const targetSocketId = userSockets[recipientPubKey];
+        const sentAt = new Date();
 
-        const insertResult = await offlineMessagesCollection.insertOne(messageDoc);
+        if (targetSocketId) {
+            // --- User is ONLINE ---
+            // Emit a generic "relayed_message" event directly to them.
+            // The client will decrypt and check if it's a group_invite or 1-to-1 msg.
+            log(`⚡ Relayed message real-time: from ${senderPubKey.slice(0,10)}... to ${recipientPubKey.slice(0,10)}...`);
+            
+            io.to(targetSocketId).emit("relayed_message", {
+                from: senderPubKey,
+                payload: encryptedPayload,
+                sentAt: sentAt
+            });
+            
+            // Send success response to the sender (we don't need a messageId)
+            res.status(200).json({ success: true, delivery: 'real-time', size: payloadSizeBytes });
 
-        console.log(`📦 Relayed message stored: ${insertResult.insertedId} from ${senderPubKey.slice(0,10)}... to ${recipientPubKey.slice(0,10)}...`);
-        res.status(201).json({ success: true, messageId: insertResult.insertedId.toString(), size: payloadSizeBytes });
+        } else {
+            // --- User is OFFLINE ---
+            // Store the message in the DB as normal.
+            const messageDoc = {
+                senderPubKey,
+                recipientPubKey,
+                encryptedPayload,
+                sizeBytes: payloadSizeBytes,
+                createdAt: sentAt,
+                expireAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000) // 14-day TTL
+            };
+
+            const insertResult = await offlineMessagesCollection.insertOne(messageDoc);
+
+            console.log(`📦 Relayed message stored: ${insertResult.insertedId} from ${senderPubKey.slice(0,10)}... to ${recipientPubKey.slice(0,10)}...`);
+            res.status(201).json({ success: true, delivery: 'offline', messageId: insertResult.insertedId.toString(), size: payloadSizeBytes });
+        }
 
     } catch (err) {
         console.error("relay-message error:", err);
